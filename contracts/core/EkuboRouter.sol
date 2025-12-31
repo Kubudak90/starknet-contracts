@@ -191,6 +191,7 @@ contract EkuboRouter is ILocker {
             TokenAmount memory currentTokenAmount = swapData.tokenAmount;
 
             DataTypes.Delta memory firstDelta;
+            DataTypes.PoolKey memory firstPoolKey;
             bool firstSwap = true;
 
             for (uint256 j = 0; j < swapData.route.length; j++) {
@@ -219,6 +220,7 @@ contract EkuboRouter is ILocker {
 
                 if (firstSwap) {
                     firstDelta = delta;
+                    firstPoolKey = node.poolKey;
                     firstSwap = false;
                 }
 
@@ -234,7 +236,8 @@ contract EkuboRouter is ILocker {
                 _handleTokenTransfers(
                     currentTokenAmount,
                     firstDelta,
-                    swapData.tokenAmount.token
+                    swapData.tokenAmount.token,
+                    firstPoolKey
                 );
             }
         }
@@ -250,7 +253,8 @@ contract EkuboRouter is ILocker {
     function _handleTokenTransfers(
         TokenAmount memory finalTokenAmount,
         DataTypes.Delta memory firstDelta,
-        address firstToken
+        address firstToken,
+        DataTypes.PoolKey memory firstPoolKey
     ) internal {
         // Withdraw the output tokens
         if (finalTokenAmount.amount < 0) {
@@ -261,11 +265,15 @@ contract EkuboRouter is ILocker {
             );
         }
 
-        // Pay the input tokens
-        // TODO: This needs proper logic to determine which delta (amount0 or amount1) to use
-        // based on whether firstToken matches token0 or token1 in the first pool
-        // For now, we use amount0 as a placeholder
-        int256 firstAmount = firstDelta.amount0;
+        // Pay the input tokens - determine which delta to use based on first token
+        int256 firstAmount;
+        if (firstToken == firstPoolKey.token0) {
+            firstAmount = firstDelta.amount0;
+        } else if (firstToken == firstPoolKey.token1) {
+            firstAmount = firstDelta.amount1;
+        } else {
+            revert("First token not in first pool");
+        }
 
         if (firstAmount > 0) {
             IERC20(firstToken).approve(address(core), uint256(firstAmount));
