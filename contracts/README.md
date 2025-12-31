@@ -178,30 +178,32 @@ DataTypes.Delta memory delta = router.swap(route, tokenAmount);
 
 ## ⚠️ Önemli Notlar
 
-1. **Swap Logic**: Core kontratındaki `_executeSwap` fonksiyonu basitleştirilmiş bir placeholder'dır. Production kullanımı için tam swap logic implementasyonu gereklidir.
+1. ✅ **Swap Logic**: Tam swap implementasyonu tamamlandı! Multi-tick crossing, fee accumulation ve price updates çalışıyor.
 
-2. **Tick Bitmap**: Bitmap-based tick arama fonksiyonları (`_nextInitializedTick`, `_prevInitializedTick`) tam implementasyonu gerektirmektedir.
+2. ⚠️ **Tick Bitmap**: Tick arama şu anda linear scan kullanıyor. Bitmap optimization ile daha da hızlandırılabilir (gas tasarrufu için).
 
-3. **Gas Optimization**: Production ortamında daha fazla gas optimizasyonu yapılabilir.
+3. ⚠️ **Gas Optimization**: Production ortamında bitmap optimization ve diğer gas optimizasyonları yapılabilir.
 
-4. **Testing**: Kontratların kapsamlı test edilmesi gerekmektedir.
+4. ⚠️ **Testing**: Kontratların kapsamlı test edilmesi gerekmektedir.
 
-5. **Audit**: Production kullanımı öncesi profesyonel security audit şarttır.
+5. ⚠️ **Audit**: Production kullanımı öncesi profesyonel security audit şarttır.
 
 ## 🚀 Geliştirme Yol Haritası
 
 - [x] Core data types
-- [x] Math kütüphaneleri
+- [x] Math kütüphaneleri (TickMath, LiquidityMath)
+- [x] **Swap math kütüphaneleri (SwapMath, SqrtPriceMath, TickBitmap)** ✨
 - [x] Core kontrat temel yapısı
 - [x] Positions kontrat
 - [x] Router kontrat
 - [x] Forward function ve IForwardee interface
 - [x] Token transfer logic
-- [ ] Tam swap logic implementasyonu
-- [ ] Tick bitmap optimizasyonları
-- [ ] Extension kontratları (TWAMM, Limit Orders)
+- [x] **Tam swap logic implementasyonu** ✨
+- [x] **Tick crossing ve fee accumulation** ✨
+- [ ] Bitmap search optimizasyonu (şu an linear scan)
+- [ ] Extension kontratları (TWAMM, Limit Orders, Oracle)
 - [ ] Kapsamlı test suite
-- [ ] Gas optimization
+- [ ] Advanced gas optimization
 - [ ] Security audit
 
 ## 📚 Kaynaklar
