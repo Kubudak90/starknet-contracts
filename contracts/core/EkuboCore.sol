@@ -2,7 +2,7 @@
 pragma solidity ^0.8.20;
 
 import {DataTypes} from "../types/DataTypes.sol";
-import {ICore, ILocker, IExtension} from "../interfaces/ICore.sol";
+import {ICore, ILocker, IExtension, IForwardee} from "../interfaces/ICore.sol";
 import {TickMath} from "../libraries/TickMath.sol";
 import {LiquidityMath} from "../libraries/LiquidityMath.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -175,6 +175,22 @@ contract EkuboCore is ICore, Ownable, ReentrancyGuard {
 
         lockCount = id;
         delete lockerAddresses[id];
+
+        return result;
+    }
+
+    /// @notice Forward the lock to another contract
+    /// @dev Temporarily changes the locker address for the duration of the forwarded call
+    function forward(address to, bytes calldata data) external returns (bytes memory) {
+        (uint32 id, address locker) = _requireLocker();
+
+        // Update this lock's locker to the forwarded address
+        lockerAddresses[id] = to;
+
+        bytes memory result = IForwardee(to).forwarded(locker, id, data);
+
+        // Restore the original locker
+        lockerAddresses[id] = locker;
 
         return result;
     }

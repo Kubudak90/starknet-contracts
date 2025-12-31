@@ -98,6 +98,8 @@ interface ICore {
     // State-Changing Functions
     function lock(bytes calldata data) external returns (bytes memory);
 
+    function forward(address to, bytes calldata data) external returns (bytes memory);
+
     function initializePool(DataTypes.PoolKey calldata poolKey, int128 initialTick) external returns (uint256);
 
     function maybeInitializePool(DataTypes.PoolKey calldata poolKey, int128 initialTick) external returns (bool initialized, uint256 sqrtRatio);
@@ -133,6 +135,17 @@ interface ILocker {
     /// @param data Callback data
     /// @return result Callback result
     function locked(uint32 id, bytes calldata data) external returns (bytes memory result);
+}
+
+/// @title IForwardee
+/// @notice Interface for contracts that can receive forwarded lock calls
+interface IForwardee {
+    /// @notice Called when a lock is forwarded to this contract
+    /// @param originalLocker The original locker address
+    /// @param id Lock identifier
+    /// @param data Callback data
+    /// @return result Callback result
+    function forwarded(address originalLocker, uint32 id, bytes calldata data) external returns (bytes memory result);
 }
 
 /// @title IExtension
