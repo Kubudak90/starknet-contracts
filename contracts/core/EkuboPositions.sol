@@ -3,6 +3,8 @@ pragma solidity ^0.8.20;
 
 import {DataTypes} from "../types/DataTypes.sol";
 import {ICore, ILocker} from "../interfaces/ICore.sol";
+import {TickMath} from "../libraries/TickMath.sol";
+import {LiquidityMath} from "../libraries/LiquidityMath.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
@@ -365,7 +367,3 @@ contract EkuboPositions is ERC721, Ownable, ILocker {
         );
     }
 }
-
-// Import TickMath and LiquidityMath for internal use
-import {TickMath} from "../libraries/TickMath.sol";
-import {LiquidityMath} from "../libraries/LiquidityMath.sol";

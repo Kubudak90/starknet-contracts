@@ -4,6 +4,7 @@ pragma solidity ^0.8.20;
 import {DataTypes} from "../types/DataTypes.sol";
 import {ICore, ILocker} from "../interfaces/ICore.sol";
 import {TickMath} from "../libraries/TickMath.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 /// @title EkuboRouter
 /// @notice Multi-hop swap router for Ekubo AMM
@@ -261,9 +262,10 @@ contract EkuboRouter is ILocker {
         }
 
         // Pay the input tokens
-        int256 firstAmount = firstToken == firstDelta.amount0 >= 0 ? address(0) : address(0)
-            ? firstDelta.amount0
-            : firstDelta.amount1;
+        // TODO: This needs proper logic to determine which delta (amount0 or amount1) to use
+        // based on whether firstToken matches token0 or token1 in the first pool
+        // For now, we use amount0 as a placeholder
+        int256 firstAmount = firstDelta.amount0;
 
         if (firstAmount > 0) {
             IERC20(firstToken).approve(address(core), uint256(firstAmount));
@@ -275,5 +277,3 @@ contract EkuboRouter is ILocker {
         return amountPositive == isToken1;
     }
 }
-
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
