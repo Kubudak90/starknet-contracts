@@ -54,6 +54,7 @@ Ana AMM motoru. Temel işlevler:
 - Swap execution
 - Fee collection ve dağıtımı
 - Protocol fee yönetimi
+- Lock forwarding (advanced use case)
 
 **Önemli Fonksiyonlar:**
 ```solidity
@@ -61,6 +62,7 @@ function initializePool(PoolKey calldata poolKey, int128 initialTick) external r
 function updatePosition(PoolKey calldata poolKey, UpdatePositionParameters calldata params) external returns (Delta memory)
 function swap(PoolKey calldata poolKey, SwapParameters calldata params) external returns (Delta memory)
 function collectFees(PoolKey calldata poolKey, bytes32 salt, Bounds calldata bounds) external returns (Delta memory)
+function forward(address to, bytes calldata data) external returns (bytes memory)
 ```
 
 ### EkuboPositions.sol
@@ -193,6 +195,8 @@ DataTypes.Delta memory delta = router.swap(route, tokenAmount);
 - [x] Core kontrat temel yapısı
 - [x] Positions kontrat
 - [x] Router kontrat
+- [x] Forward function ve IForwardee interface
+- [x] Token transfer logic
 - [ ] Tam swap logic implementasyonu
 - [ ] Tick bitmap optimizasyonları
 - [ ] Extension kontratları (TWAMM, Limit Orders)
