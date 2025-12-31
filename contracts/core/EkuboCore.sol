@@ -5,6 +5,9 @@ import {DataTypes} from "../types/DataTypes.sol";
 import {ICore, ILocker, IExtension, IForwardee} from "../interfaces/ICore.sol";
 import {TickMath} from "../libraries/TickMath.sol";
 import {LiquidityMath} from "../libraries/LiquidityMath.sol";
+import {SwapMath} from "../libraries/SwapMath.sol";
+import {SqrtPriceMath} from "../libraries/SqrtPriceMath.sol";
+import {TickBitmap} from "../libraries/TickBitmap.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
@@ -34,7 +37,7 @@ contract EkuboCore is ICore, Ownable, ReentrancyGuard {
     mapping(bytes32 => mapping(int128 => uint128)) public tickLiquidityNet;
     mapping(bytes32 => mapping(int128 => int128)) public tickLiquidityDelta;
     mapping(bytes32 => mapping(int128 => DataTypes.FeesPerLiquidity)) public tickFeesOutside;
-    mapping(bytes32 => mapping(uint128 => uint256)) public tickBitmaps;
+    mapping(bytes32 => mapping(int16 => uint256)) public tickBitmaps;
 
     // Position state
     mapping(bytes32 => DataTypes.Position) public positions;
@@ -771,15 +774,110 @@ contract EkuboCore is ICore, Ownable, ReentrancyGuard {
         DataTypes.PoolPrice storage price,
         DataTypes.SwapParameters calldata params
     ) internal returns (DataTypes.Delta memory) {
-        // Simplified swap implementation
-        // Full implementation would include:
-        // - Tick crossing logic
-        // - Fee accumulation
-        // - Price updates
-        // - Liquidity changes
+        bool increasing = SwapMath.isPriceIncreasing(params.amount < 0, params.isToken1);
 
-        // This is a placeholder that would need full swap logic
-        return DataTypes.Delta({amount0: 0, amount1: 0});
+        // Validate limit direction
+        require((params.sqrtRatioLimit > price.sqrtRatio) == increasing, "LIMIT_DIRECTION");
+        require(
+            params.sqrtRatioLimit >= TickMath.MIN_SQRT_RATIO &&
+            params.sqrtRatioLimit <= TickMath.MAX_SQRT_RATIO,
+            "LIMIT_MAG"
+        );
+
+        int128 tick = price.tick;
+        int256 amountRemaining = params.amount;
+        uint256 sqrtRatio = price.sqrtRatio;
+        uint128 liquidity = poolLiquidity[poolKeyHash];
+        uint128 calculatedAmount = 0;
+
+        DataTypes.FeesPerLiquidity memory feesPerLiq = poolFees[poolKeyHash];
+
+        // Main swap loop
+        while (amountRemaining != 0 && sqrtRatio != params.sqrtRatioLimit) {
+            // Find next initialized tick
+            (int128 nextTick, bool isInitialized) = increasing
+                ? _nextInitializedTick(poolKeyHash, poolKey.tickSpacing, tick, params.skipAhead)
+                : _prevInitializedTick(poolKeyHash, poolKey.tickSpacing, tick, params.skipAhead);
+
+            uint256 nextTickSqrtRatio = TickMath.tickToSqrtRatio(nextTick);
+
+            // Determine step limit
+            uint256 stepSqrtRatioLimit = increasing
+                ? (params.sqrtRatioLimit < nextTickSqrtRatio ? params.sqrtRatioLimit : nextTickSqrtRatio)
+                : (params.sqrtRatioLimit > nextTickSqrtRatio ? params.sqrtRatioLimit : nextTickSqrtRatio);
+
+            // Execute swap step
+            SwapMath.SwapResult memory swapResult = SwapMath.computeSwapStep(
+                sqrtRatio,
+                liquidity,
+                stepSqrtRatioLimit,
+                amountRemaining,
+                params.isToken1,
+                poolKey.fee
+            );
+
+            // Accumulate fees
+            if (swapResult.feeAmount > 0 && liquidity > 0) {
+                uint256 feeGrowth = (uint256(swapResult.feeAmount) << 128) / liquidity;
+                if (increasing) {
+                    feesPerLiq.amount1 += feeGrowth;
+                } else {
+                    feesPerLiq.amount0 += feeGrowth;
+                }
+            }
+
+            amountRemaining -= swapResult.consumedAmount;
+            calculatedAmount += swapResult.calculatedAmount;
+
+            // Check if we crossed a tick
+            if (swapResult.sqrtRatioNext == nextTickSqrtRatio) {
+                sqrtRatio = swapResult.sqrtRatioNext;
+                tick = increasing ? nextTick : nextTick - 1;
+
+                // Cross the tick if initialized
+                if (isInitialized) {
+                    int128 liquidityDelta = tickLiquidityDelta[poolKeyHash][nextTick];
+
+                    if (increasing) {
+                        liquidity = _addLiquidity(liquidity, liquidityDelta);
+                    } else {
+                        liquidity = _addLiquidity(liquidity, -liquidityDelta);
+                    }
+
+                    // Update tick fees outside
+                    DataTypes.FeesPerLiquidity storage feesOutside = tickFeesOutside[poolKeyHash][nextTick];
+                    if (increasing) {
+                        feesOutside.amount0 = feesPerLiq.amount0 - feesOutside.amount0;
+                        feesOutside.amount1 = feesPerLiq.amount1 - feesOutside.amount1;
+                    } else {
+                        feesOutside.amount0 = feesPerLiq.amount0 - feesOutside.amount0;
+                        feesOutside.amount1 = feesPerLiq.amount1 - feesOutside.amount1;
+                    }
+                }
+            } else {
+                // Didn't cross tick, just update price
+                sqrtRatio = swapResult.sqrtRatioNext;
+                tick = TickMath.sqrtRatioToTick(sqrtRatio);
+            }
+        }
+
+        // Update pool state
+        price.sqrtRatio = sqrtRatio;
+        price.tick = tick;
+        poolLiquidity[poolKeyHash] = liquidity;
+        poolFees[poolKeyHash] = feesPerLiq;
+
+        // Calculate final delta
+        DataTypes.Delta memory delta;
+        if (params.isToken1) {
+            delta.amount0 = -int256(uint256(calculatedAmount));
+            delta.amount1 = params.amount - amountRemaining;
+        } else {
+            delta.amount0 = params.amount - amountRemaining;
+            delta.amount1 = -int256(uint256(calculatedAmount));
+        }
+
+        return delta;
     }
 
     function _nextInitializedTick(
@@ -788,8 +886,19 @@ contract EkuboCore is ICore, Ownable, ReentrancyGuard {
         int128 tick,
         uint128 skipAhead
     ) internal view returns (int128, bool) {
-        // Bitmap-based tick search logic would go here
-        return (tick, false);
+        // Simplified version - full implementation would use bitmap optimization with skipAhead
+        // For now, scan forward for next initialized tick
+        int128 next = tick + int128(uint128(tickSpacing));
+
+        // Limit search range
+        for (uint256 i = 0; i < 256 && next <= TickMath.MAX_TICK; i++) {
+            if (tickLiquidityNet[poolKeyHash][next] > 0) {
+                return (next, true);
+            }
+            next += int128(uint128(tickSpacing));
+        }
+
+        return (TickMath.MAX_TICK, false);
     }
 
     function _prevInitializedTick(
@@ -798,7 +907,18 @@ contract EkuboCore is ICore, Ownable, ReentrancyGuard {
         int128 tick,
         uint128 skipAhead
     ) internal view returns (int128, bool) {
-        // Bitmap-based tick search logic would go here
-        return (tick, false);
+        // Simplified version - full implementation would use bitmap optimization with skipAhead
+        // For now, scan backward for previous initialized tick
+        int128 prev = tick - int128(uint128(tickSpacing));
+
+        // Limit search range
+        for (uint256 i = 0; i < 256 && prev >= TickMath.MIN_TICK; i++) {
+            if (tickLiquidityNet[poolKeyHash][prev] > 0) {
+                return (prev, true);
+            }
+            prev -= int128(uint128(tickSpacing));
+        }
+
+        return (TickMath.MIN_TICK, false);
     }
 }
