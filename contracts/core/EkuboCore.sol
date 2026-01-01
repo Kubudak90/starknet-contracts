@@ -19,6 +19,30 @@ contract EkuboCore is ICore, Ownable, ReentrancyGuard {
     using TickMath for int128;
     using TickMath for uint256;
 
+    // Custom errors for gas optimization
+    error DeltasNotSettled();
+    error PoolAlreadyInitialized();
+    error ExtensionNotRegistered();
+    error PoolNotInitialized();
+    error NotLocked();
+    error NotLocker();
+    error TransferFailed();
+    error TransferFromFailed();
+    error TransferInvariantViolated();
+    error InvalidTokenOrder();
+    error TokenCannotBeZero();
+    error InvalidTickSpacing();
+    error InvalidBoundsOrder();
+    error LowerBoundTooLow();
+    error UpperBoundTooHigh();
+    error BoundsNotAlignedToTickSpacing();
+    error InsufficientSavedBalance();
+    error NotExtension();
+    error InvalidCallPoints();
+    error LimitDirectionInvalid();
+    error LimitMagnitudeInvalid();
+    error MustCollectFees();
+
     // Protocol fee storage (token => collected fees)
     mapping(address => uint128) public protocolFeesCollected;
 
@@ -169,12 +193,12 @@ contract EkuboCore is ICore, Ownable, ReentrancyGuard {
     /// @notice Lock the contract and execute callback
     function lock(bytes calldata data) external nonReentrant returns (bytes memory) {
         uint32 id = lockCount;
-        lockCount = id + 1;
+        unchecked { lockCount = id + 1; }
         lockerAddresses[id] = msg.sender;
 
         bytes memory result = ILocker(msg.sender).locked(id, data);
 
-        require(nonzeroDeltaCounts[id] == 0, "Deltas not settled");
+        if (nonzeroDeltaCounts[id] != 0) revert DeltasNotSettled();
 
         lockCount = id;
         delete lockerAddresses[id];
@@ -208,15 +232,14 @@ contract EkuboCore is ICore, Ownable, ReentrancyGuard {
         bytes32 poolKeyHash = getPoolKeyHash(poolKey);
         DataTypes.PoolPrice storage price = poolPrices[poolKeyHash];
 
-        require(price.sqrtRatio == 0, "Already initialized");
+        if (price.sqrtRatio != 0) revert PoolAlreadyInitialized();
 
         // Check extension is registered if present
         if (poolKey.extension != address(0)) {
-            require(
-                extensionCallPoints[poolKey.extension].beforeInitializePool ||
-                extensionCallPoints[poolKey.extension].afterInitializePool,
-                "Extension not registered"
-            );
+            if (!extensionCallPoints[poolKey.extension].beforeInitializePool &&
+                !extensionCallPoints[poolKey.extension].afterInitializePool) {
+                revert ExtensionNotRegistered();
+            }
         }
 
         DataTypes.CallPoints memory callPoints = _getCallPointsForCaller(poolKey, msg.sender);
@@ -273,7 +296,7 @@ contract EkuboCore is ICore, Ownable, ReentrancyGuard {
 
         bytes32 poolKeyHash = getPoolKeyHash(poolKey);
         DataTypes.PoolPrice storage price = poolPrices[poolKeyHash];
-        require(price.sqrtRatio != 0, "Not initialized");
+        if (price.sqrtRatio == 0) revert PoolNotInitialized();
 
         (uint256 sqrtRatioLower, uint256 sqrtRatioUpper) = (
             TickMath.tickToSqrtRatio(params.bounds.lower),
@@ -410,7 +433,7 @@ contract EkuboCore is ICore, Ownable, ReentrancyGuard {
 
         bytes32 poolKeyHash = getPoolKeyHash(poolKey);
         DataTypes.PoolPrice storage price = poolPrices[poolKeyHash];
-        require(price.sqrtRatio != 0, "Not initialized");
+        if (price.sqrtRatio == 0) revert PoolNotInitialized();
 
         // Execute swap logic (simplified - full implementation would be more complex)
         delta = _executeSwap(poolKeyHash, poolKey, price, params);
@@ -440,10 +463,7 @@ contract EkuboCore is ICore, Ownable, ReentrancyGuard {
 
         _accountDelta(id, token, int256(uint256(amount)));
 
-        require(
-            IERC20(token).transfer(recipient, amount),
-            "Transfer failed"
-        );
+        if (!IERC20(token).transfer(recipient, amount)) revert TransferFailed();
     }
 
     /// @notice Pay tokens to the contract
@@ -454,13 +474,12 @@ contract EkuboCore is ICore, Ownable, ReentrancyGuard {
         uint256 allowance = tokenContract.allowance(payer, address(this));
         uint256 balanceBefore = tokenContract.balanceOf(address(this));
 
-        require(
-            tokenContract.transferFrom(payer, address(this), allowance),
-            "TransferFrom failed"
-        );
+        if (!tokenContract.transferFrom(payer, address(this), allowance)) {
+            revert TransferFromFailed();
+        }
 
         uint256 delta = tokenContract.balanceOf(address(this)) - balanceBefore;
-        require(delta == allowance, "Transfer invariant");
+        if (delta != allowance) revert TransferInvariantViolated();
 
         _accountDelta(id, token, -int256(delta));
     }
@@ -484,7 +503,7 @@ contract EkuboCore is ICore, Ownable, ReentrancyGuard {
     /// @notice Load previously saved balance
     function load(address token, bytes32 salt, uint128 amount) external returns (uint128) {
         uint32 id = lockCount > 0 ? lockCount - 1 : 0;
-        require(id < lockCount, "Not locked");
+        if (id >= lockCount) revert NotLocked();
 
         DataTypes.SavedBalanceKey memory key = DataTypes.SavedBalanceKey({
             owner: msg.sender,
@@ -494,7 +513,7 @@ contract EkuboCore is ICore, Ownable, ReentrancyGuard {
 
         bytes32 keyHash = getSavedBalanceKeyHash(key);
         uint128 saved = savedBalances[keyHash];
-        require(amount <= saved, "Insufficient saved balance");
+        if (amount > saved) revert InsufficientSavedBalance();
 
         uint128 next = saved - amount;
         savedBalances[keyHash] = next;
@@ -515,7 +534,7 @@ contract EkuboCore is ICore, Ownable, ReentrancyGuard {
         uint128 collected = protocolFeesCollected[token];
         protocolFeesCollected[token] = collected - amount;
 
-        require(IERC20(token).transfer(recipient, amount), "Transfer failed");
+        if (!IERC20(token).transfer(recipient, amount)) revert TransferFailed();
 
         emit ProtocolFeesWithdrawn(recipient, token, amount);
     }
@@ -537,7 +556,7 @@ contract EkuboCore is ICore, Ownable, ReentrancyGuard {
         uint128 amount1
     ) external {
         (uint32 id, address locker) = _requireLocker();
-        require(locker == poolKey.extension, "Not extension");
+        if (locker != poolKey.extension) revert NotExtension();
 
         bytes32 poolKeyHash = getPoolKeyHash(poolKey);
         uint128 liquidity = poolLiquidity[poolKeyHash];
@@ -562,17 +581,16 @@ contract EkuboCore is ICore, Ownable, ReentrancyGuard {
 
     /// @notice Set call points for an extension
     function setCallPoints(DataTypes.CallPoints calldata callPoints) external {
-        require(
-            callPoints.beforeInitializePool ||
-            callPoints.afterInitializePool ||
-            callPoints.beforeUpdatePosition ||
-            callPoints.afterUpdatePosition ||
-            callPoints.beforeSwap ||
-            callPoints.afterSwap ||
-            callPoints.beforeCollectFees ||
-            callPoints.afterCollectFees,
-            "Invalid call points"
-        );
+        if (!callPoints.beforeInitializePool &&
+            !callPoints.afterInitializePool &&
+            !callPoints.beforeUpdatePosition &&
+            !callPoints.afterUpdatePosition &&
+            !callPoints.beforeSwap &&
+            !callPoints.afterSwap &&
+            !callPoints.beforeCollectFees &&
+            !callPoints.afterCollectFees) {
+            revert InvalidCallPoints();
+        }
 
         extensionCallPoints[msg.sender] = callPoints;
     }
@@ -580,10 +598,10 @@ contract EkuboCore is ICore, Ownable, ReentrancyGuard {
     // Internal helper functions
 
     function _requireLocker() internal view returns (uint32 id, address locker) {
-        require(lockCount > 0, "Not locked");
+        if (lockCount == 0) revert NotLocked();
         id = lockCount - 1;
         locker = lockerAddresses[id];
-        require(locker == msg.sender, "Not locker");
+        if (locker != msg.sender) revert NotLocker();
     }
 
     function _accountDelta(uint32 id, address token, int256 delta) internal {
@@ -613,23 +631,21 @@ contract EkuboCore is ICore, Ownable, ReentrancyGuard {
     }
 
     function _checkPoolKeyValid(DataTypes.PoolKey calldata poolKey) internal pure {
-        require(poolKey.token0 < poolKey.token1, "Invalid token order");
-        require(poolKey.token0 != address(0), "Token cannot be zero");
-        require(
-            poolKey.tickSpacing > 0 && poolKey.tickSpacing <= TickMath.MAX_TICK_SPACING,
-            "Invalid tick spacing"
-        );
+        if (poolKey.token0 >= poolKey.token1) revert InvalidTokenOrder();
+        if (poolKey.token0 == address(0)) revert TokenCannotBeZero();
+        if (poolKey.tickSpacing == 0 || poolKey.tickSpacing > TickMath.MAX_TICK_SPACING) {
+            revert InvalidTickSpacing();
+        }
     }
 
     function _checkBoundsValid(DataTypes.Bounds calldata bounds, uint128 tickSpacing) internal pure {
-        require(bounds.lower < bounds.upper, "Invalid bounds order");
-        require(bounds.lower >= TickMath.MIN_TICK, "Lower bound too low");
-        require(bounds.upper <= TickMath.MAX_TICK, "Upper bound too high");
-        require(
-            uint128(bounds.lower >= 0 ? bounds.lower : -bounds.lower) % tickSpacing == 0 &&
-            uint128(bounds.upper >= 0 ? bounds.upper : -bounds.upper) % tickSpacing == 0,
-            "Bounds not aligned to tick spacing"
-        );
+        if (bounds.lower >= bounds.upper) revert InvalidBoundsOrder();
+        if (bounds.lower < TickMath.MIN_TICK) revert LowerBoundTooLow();
+        if (bounds.upper > TickMath.MAX_TICK) revert UpperBoundTooHigh();
+        if (uint128(bounds.lower >= 0 ? bounds.lower : -bounds.lower) % tickSpacing != 0 ||
+            uint128(bounds.upper >= 0 ? bounds.upper : -bounds.upper) % tickSpacing != 0) {
+            revert BoundsNotAlignedToTickSpacing();
+        }
     }
 
     function _getCallPointsForCaller(
@@ -727,7 +743,7 @@ contract EkuboCore is ICore, Ownable, ReentrancyGuard {
                 amount1: feesPerLiquidityInsideCurrent.amount1 - ((uint256(fees1) << 128) / nextLiquidity)
             });
         } else {
-            require(fees0 == 0 && fees1 == 0, "Must collect fees");
+            if (fees0 != 0 || fees1 != 0) revert MustCollectFees();
             delete positions[posKey];
         }
     }
@@ -789,12 +805,11 @@ contract EkuboCore is ICore, Ownable, ReentrancyGuard {
         bool increasing = SwapMath.isPriceIncreasing(params.amount < 0, params.isToken1);
 
         // Validate limit direction
-        require((params.sqrtRatioLimit > price.sqrtRatio) == increasing, "LIMIT_DIRECTION");
-        require(
-            params.sqrtRatioLimit >= TickMath.MIN_SQRT_RATIO &&
-            params.sqrtRatioLimit <= TickMath.MAX_SQRT_RATIO,
-            "LIMIT_MAG"
-        );
+        if ((params.sqrtRatioLimit > price.sqrtRatio) != increasing) revert LimitDirectionInvalid();
+        if (params.sqrtRatioLimit < TickMath.MIN_SQRT_RATIO ||
+            params.sqrtRatioLimit > TickMath.MAX_SQRT_RATIO) {
+            revert LimitMagnitudeInvalid();
+        }
 
         int128 tick = price.tick;
         int256 amountRemaining = params.amount;
@@ -832,14 +847,16 @@ contract EkuboCore is ICore, Ownable, ReentrancyGuard {
             if (swapResult.feeAmount > 0 && liquidity > 0) {
                 uint256 feeGrowth = (uint256(swapResult.feeAmount) << 128) / liquidity;
                 if (increasing) {
-                    feesPerLiq.amount1 += feeGrowth;
+                    unchecked { feesPerLiq.amount1 += feeGrowth; }
                 } else {
-                    feesPerLiq.amount0 += feeGrowth;
+                    unchecked { feesPerLiq.amount0 += feeGrowth; }
                 }
             }
 
-            amountRemaining -= swapResult.consumedAmount;
-            calculatedAmount += swapResult.calculatedAmount;
+            unchecked {
+                amountRemaining -= swapResult.consumedAmount;
+                calculatedAmount += swapResult.calculatedAmount;
+            }
 
             // Check if we crossed a tick
             if (swapResult.sqrtRatioNext == nextTickSqrtRatio) {
@@ -910,7 +927,7 @@ contract EkuboCore is ICore, Ownable, ReentrancyGuard {
         }
 
         // Search up to 256 words (65536 ticks per word * 256 = ~16M ticks)
-        for (uint256 i = 0; i < 256; i++) {
+        for (uint256 i = 0; i < 256; ) {
             (int24 next, bool initialized) = TickBitmap.nextInitializedTickWithinOneWord(
                 tickBitmaps[poolKeyHash],
                 currentTick,
@@ -927,6 +944,8 @@ contract EkuboCore is ICore, Ownable, ReentrancyGuard {
             if (currentTick > int24(TickMath.MAX_TICK)) {
                 break;
             }
+
+            unchecked { ++i; }
         }
 
         return (TickMath.MAX_TICK, false);
@@ -950,7 +969,7 @@ contract EkuboCore is ICore, Ownable, ReentrancyGuard {
         }
 
         // Search up to 256 words backwards
-        for (uint256 i = 0; i < 256; i++) {
+        for (uint256 i = 0; i < 256; ) {
             (int24 prev, bool initialized) = TickBitmap.nextInitializedTickWithinOneWord(
                 tickBitmaps[poolKeyHash],
                 currentTick,
@@ -967,6 +986,8 @@ contract EkuboCore is ICore, Ownable, ReentrancyGuard {
             if (currentTick < int24(TickMath.MIN_TICK)) {
                 break;
             }
+
+            unchecked { ++i; }
         }
 
         return (TickMath.MIN_TICK, false);
