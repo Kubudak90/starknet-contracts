@@ -752,8 +752,20 @@ contract EkuboCore is ICore, Ownable, ReentrancyGuard {
         bool isInitialized = nextNet != 0;
 
         if (wasInitialized != isInitialized) {
-            // Bitmap update logic would go here
+            _flipTickInBitmap(poolKeyHash, tick, int24(uint24(tickSpacing)));
         }
+    }
+
+    function _flipTickInBitmap(
+        bytes32 poolKeyHash,
+        int128 tick,
+        int24 tickSpacing
+    ) internal {
+        TickBitmap.flipTick(
+            tickBitmaps[poolKeyHash],
+            int24(tick),
+            tickSpacing
+        );
     }
 
     function _addLiquidity(uint128 liquidity, int128 delta) internal pure returns (uint128) {
@@ -886,16 +898,35 @@ contract EkuboCore is ICore, Ownable, ReentrancyGuard {
         int128 tick,
         uint128 skipAhead
     ) internal view returns (int128, bool) {
-        // Simplified version - full implementation would use bitmap optimization with skipAhead
-        // For now, scan forward for next initialized tick
-        int128 next = tick + int128(uint128(tickSpacing));
+        int24 tickSpacing24 = int24(uint24(tickSpacing));
+        int24 currentTick = int24(tick);
 
-        // Limit search range
-        for (uint256 i = 0; i < 256 && next <= TickMath.MAX_TICK; i++) {
-            if (tickLiquidityNet[poolKeyHash][next] > 0) {
-                return (next, true);
+        // Skip ahead if requested
+        if (skipAhead > 0) {
+            currentTick += int24(uint24(skipAhead)) * tickSpacing24;
+            if (currentTick > int24(TickMath.MAX_TICK)) {
+                return (TickMath.MAX_TICK, false);
             }
-            next += int128(uint128(tickSpacing));
+        }
+
+        // Search up to 256 words (65536 ticks per word * 256 = ~16M ticks)
+        for (uint256 i = 0; i < 256; i++) {
+            (int24 next, bool initialized) = TickBitmap.nextInitializedTickWithinOneWord(
+                tickBitmaps[poolKeyHash],
+                currentTick,
+                tickSpacing24,
+                false // lte = false means search forward
+            );
+
+            if (initialized) {
+                return (int128(next), true);
+            }
+
+            // Move to next word
+            currentTick = next + tickSpacing24;
+            if (currentTick > int24(TickMath.MAX_TICK)) {
+                break;
+            }
         }
 
         return (TickMath.MAX_TICK, false);
@@ -907,16 +938,35 @@ contract EkuboCore is ICore, Ownable, ReentrancyGuard {
         int128 tick,
         uint128 skipAhead
     ) internal view returns (int128, bool) {
-        // Simplified version - full implementation would use bitmap optimization with skipAhead
-        // For now, scan backward for previous initialized tick
-        int128 prev = tick - int128(uint128(tickSpacing));
+        int24 tickSpacing24 = int24(uint24(tickSpacing));
+        int24 currentTick = int24(tick);
 
-        // Limit search range
-        for (uint256 i = 0; i < 256 && prev >= TickMath.MIN_TICK; i++) {
-            if (tickLiquidityNet[poolKeyHash][prev] > 0) {
-                return (prev, true);
+        // Skip ahead (backwards) if requested
+        if (skipAhead > 0) {
+            currentTick -= int24(uint24(skipAhead)) * tickSpacing24;
+            if (currentTick < int24(TickMath.MIN_TICK)) {
+                return (TickMath.MIN_TICK, false);
             }
-            prev -= int128(uint128(tickSpacing));
+        }
+
+        // Search up to 256 words backwards
+        for (uint256 i = 0; i < 256; i++) {
+            (int24 prev, bool initialized) = TickBitmap.nextInitializedTickWithinOneWord(
+                tickBitmaps[poolKeyHash],
+                currentTick,
+                tickSpacing24,
+                true // lte = true means search backward
+            );
+
+            if (initialized) {
+                return (int128(prev), true);
+            }
+
+            // Move to previous word
+            currentTick = prev - tickSpacing24;
+            if (currentTick < int24(TickMath.MIN_TICK)) {
+                break;
+            }
         }
 
         return (TickMath.MIN_TICK, false);
