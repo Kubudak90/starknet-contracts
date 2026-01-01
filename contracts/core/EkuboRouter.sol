@@ -133,15 +133,162 @@ contract EkuboRouter is ILocker {
         return _executeSwaps(swaps, true);
     }
 
-    /// @notice Get market depth at a specific price range
+    /// @notice Get the delta required to swap a pool to a target sqrt ratio
+    /// @param poolKey The pool to query
+    /// @param sqrtRatio The target sqrt ratio
+    /// @return delta The amount delta required to reach the target price
+    function getDeltaToSqrtRatio(
+        DataTypes.PoolKey calldata poolKey,
+        uint256 sqrtRatio
+    ) external returns (DataTypes.Delta memory delta) {
+        // Get current pool price
+        DataTypes.PoolPrice memory currentPrice = core.getPoolPrice(poolKey);
+
+        // Calculate skip ahead
+        int128 tickDiff = currentPrice.tick - TickMath.sqrtRatioToTick(sqrtRatio);
+        uint128 tickDiffMag = tickDiff >= 0 ? uint128(tickDiff) : uint128(-tickDiff);
+        uint128 skipAhead = tickDiffMag / (poolKey.tickSpacing * 127);
+
+        // Create swap parameters with max amount
+        RouteNode memory node = RouteNode({
+            poolKey: poolKey,
+            sqrtRatioLimit: sqrtRatio,
+            skipAhead: skipAhead
+        });
+
+        TokenAmount memory tokenAmount = TokenAmount({
+            token: sqrtRatio <= currentPrice.sqrtRatio ? poolKey.token1 : poolKey.token0,
+            amount: type(int256).min // Max negative amount
+        });
+
+        // Execute the swap and return delta
+        return swap(node, tokenAmount);
+    }
+
+    /// @notice Get market depth at current price
+    /// @param poolKey The pool to query
+    /// @param sqrtPercent The percent range to check (as sqrt)
+    /// @return token0Depth Depth in token0 direction
+    /// @return token1Depth Depth in token1 direction
     function getMarketDepth(
         DataTypes.PoolKey calldata poolKey,
+        uint128 sqrtPercent
+    ) external returns (uint128 token0Depth, uint128 token1Depth) {
+        // Convert sqrt percent to 64x64 fixed point
+        // p_plus_one = u256 { high: 1, low: sqrt_percent }
+        uint256 pPlusOne = (uint256(1) << 128) | uint256(sqrtPercent);
+
+        // percent_64x64 = (pPlusOne * pPlusOne) / (2^256 / 2^64) - 2^64
+        uint256 denomForPercent = 0x1000000000000000000000000000000000000000000000000; // 2^192
+        uint256 percent64x64PlusOne = (pPlusOne * pPlusOne) / denomForPercent;
+        uint128 percent64x64 = uint128(percent64x64PlusOne - 0x10000000000000000);
+
+        // Get current pool price
+        DataTypes.PoolPrice memory currentPrice = core.getPoolPrice(poolKey);
+
+        return getMarketDepthAtSqrtRatio(poolKey, currentPrice.sqrtRatio, percent64x64);
+    }
+
+    /// @notice Get market depth at a specific sqrt ratio
+    /// @param poolKey The pool to query
+    /// @param sqrtRatio The starting sqrt ratio
+    /// @param percent64x64 The percent range in 64x64 fixed point
+    /// @return token0Depth Depth in token0 direction (price going down)
+    /// @return token1Depth Depth in token1 direction (price going up)
+    function getMarketDepthAtSqrtRatio(
+        DataTypes.PoolKey calldata poolKey,
         uint256 sqrtRatio,
-        uint128 percentBps
-    ) external view returns (uint128 token0Depth, uint128 token1Depth) {
-        // Simplified depth calculation
-        // Full implementation would query pool state and calculate liquidity depth
-        return (0, 0);
+        uint128 percent64x64
+    ) external returns (uint128 token0Depth, uint128 token1Depth) {
+        // Calculate sqrt_percent from percent_64x64
+        uint256 sqrt_percent = _sqrt((0x100000000000000000000000000000000 + (uint256(percent64x64) * 0x10000000000000000))) - 0x10000000000000000;
+
+        // 2^64 as 1.64 fixed point
+        uint256 denom = 0x10000000000000000;
+        uint256 num = denom + sqrt_percent;
+
+        DataTypes.PoolPrice memory currentPoolPrice = core.getPoolPrice(poolKey);
+
+        // Swap to the specified starting price if needed
+        if (currentPoolPrice.sqrtRatio != sqrtRatio) {
+            int128 tickStart = TickMath.sqrtRatioToTick(sqrtRatio);
+            int128 tickDiff = currentPoolPrice.tick - tickStart;
+            uint128 tickDiffMag = tickDiff >= 0 ? uint128(tickDiff) : uint128(-tickDiff);
+
+            core.swap(
+                poolKey,
+                DataTypes.SwapParameters({
+                    amount: type(int256).min, // Max negative amount
+                    isToken1: sqrtRatio < currentPoolPrice.sqrtRatio,
+                    sqrtRatioLimit: sqrtRatio,
+                    skipAhead: tickDiffMag / (poolKey.tickSpacing * 127)
+                })
+            );
+
+            currentPoolPrice.sqrtRatio = sqrtRatio;
+            currentPoolPrice.tick = tickStart;
+        }
+
+        // Calculate price bounds
+        uint256 priceHigh = _min(
+            _mulDiv(currentPoolPrice.sqrtRatio, num, denom),
+            TickMath.MAX_SQRT_RATIO
+        );
+        uint256 priceLow = _max(
+            _mulDivRoundUp(currentPoolPrice.sqrtRatio, denom, num),
+            TickMath.MIN_SQRT_RATIO
+        );
+
+        // Calculate skip ahead for downward direction
+        int128 tickLow = TickMath.sqrtRatioToTick(priceLow);
+        int128 skipTickDiff = currentPoolPrice.tick - tickLow;
+        uint128 skipTickDiffMag = skipTickDiff >= 0 ? uint128(skipTickDiff) : uint128(-skipTickDiff);
+        uint128 skipAhead = skipTickDiffMag / (poolKey.tickSpacing * 127);
+
+        // Swap upward to price_high
+        DataTypes.Delta memory deltaHigh;
+        if (currentPoolPrice.sqrtRatio != priceHigh) {
+            deltaHigh = core.swap(
+                poolKey,
+                DataTypes.SwapParameters({
+                    amount: type(int256).min,
+                    isToken1: false,
+                    sqrtRatioLimit: priceHigh,
+                    skipAhead: skipAhead
+                })
+            );
+        }
+
+        // Swap back to starting price
+        if (currentPoolPrice.sqrtRatio != priceHigh) {
+            core.swap(
+                poolKey,
+                DataTypes.SwapParameters({
+                    amount: type(int256).min,
+                    isToken1: true,
+                    sqrtRatioLimit: currentPoolPrice.sqrtRatio,
+                    skipAhead: skipAhead
+                })
+            );
+        }
+
+        // Swap downward to price_low
+        DataTypes.Delta memory deltaLow;
+        if (currentPoolPrice.sqrtRatio != priceLow) {
+            deltaLow = core.swap(
+                poolKey,
+                DataTypes.SwapParameters({
+                    amount: type(int256).min,
+                    isToken1: true,
+                    sqrtRatioLimit: priceLow,
+                    skipAhead: skipAhead
+                })
+            );
+        }
+
+        // Return the magnitudes
+        token0Depth = deltaHigh.amount0 >= 0 ? uint128(uint256(deltaHigh.amount0)) : uint128(uint256(-deltaHigh.amount0));
+        token1Depth = deltaLow.amount1 >= 0 ? uint128(uint256(deltaLow.amount1)) : uint128(uint256(-deltaLow.amount1));
     }
 
     /// @notice Callback from Core.lock()
@@ -283,5 +430,49 @@ contract EkuboRouter is ILocker {
 
     function _isPriceIncreasing(bool amountPositive, bool isToken1) internal pure returns (bool) {
         return amountPositive == isToken1;
+    }
+
+    /// @notice Calculate square root using Babylonian method
+    function _sqrt(uint256 x) internal pure returns (uint256) {
+        if (x == 0) return 0;
+
+        uint256 z = (x + 1) / 2;
+        uint256 y = x;
+
+        while (z < y) {
+            y = z;
+            z = (x / z + z) / 2;
+        }
+
+        return y;
+    }
+
+    /// @notice Multiply and divide with rounding down
+    function _mulDiv(uint256 a, uint256 b, uint256 denominator) internal pure returns (uint256) {
+        uint256 result = (a * b) / denominator;
+        return result;
+    }
+
+    /// @notice Multiply and divide with rounding up
+    function _mulDivRoundUp(uint256 a, uint256 b, uint256 denominator) internal pure returns (uint256) {
+        uint256 result = (a * b);
+        uint256 remainder = result % denominator;
+        result = result / denominator;
+
+        if (remainder > 0) {
+            result += 1;
+        }
+
+        return result;
+    }
+
+    /// @notice Return minimum of two values
+    function _min(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a < b ? a : b;
+    }
+
+    /// @notice Return maximum of two values
+    function _max(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a > b ? a : b;
     }
 }
