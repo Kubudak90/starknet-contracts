@@ -30,6 +30,12 @@ This is an EVM-compatible adaptation of the Ekubo Protocol, originally built for
 - **SqrtPriceMath.sol**: Square root price math
 - **TickBitmap.sol**: Gas-efficient tick initialization tracking
 
+### Extensions
+- **TWAMMExtension.sol**: Time-Weighted Average Market Maker for gradual order execution
+  - Submit long-term orders that execute over time
+  - Reduces price impact for large trades
+  - Automatic execution via swap hooks
+
 ## Testing
 
 See [test/README.md](test/README.md) for detailed testing documentation.
@@ -62,7 +68,14 @@ Current implementation includes:
 - ✅ Extension hook system
 - ✅ Bitmap tick optimization
 - ✅ Comprehensive gas optimizations
-- ✅ Basic test suite
+- ✅ Basic test suite (Foundry)
+- ✅ TWAMM extension for time-weighted order execution
+
+Completed optimizations:
+- ✅ Bitmap-based tick search (commit 2a6d55c)
+- ✅ Custom errors for gas savings (commit e126649)
+- ✅ Unchecked arithmetic optimizations (commit e126649)
+- ✅ Test infrastructure with mocks (commit ffcdb6e)
 
 ## License
 
